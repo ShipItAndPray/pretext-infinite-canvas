@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Pretext Infinite Canvas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0f0f0f;
+    overflow: hidden;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #e0e0e0;
+    width: 100vw;
+    height: 100vh;
+    cursor: grab;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  body.grabbing { cursor: grabbing; }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ── Toolbar ─────────────────────────────────────── */
+  #toolbar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 48px;
+    background: rgba(15, 15, 15, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    z-index: 10;
+    font-size: 13px;
+  }
+
+  #toolbar .title {
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: -0.3px;
+    background: linear-gradient(135deg, #a78bfa, #60a5fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  #toolbar .stats {
+    display: flex;
+    gap: 18px;
+    color: #888;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  #toolbar .stats span { white-space: nowrap; }
+  #toolbar .stats .val { color: #ccc; }
+
+  /* ── Badge ───────────────────────────────────────── */
+  #badge {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: rgba(15, 15, 15, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 11px;
+    color: #666;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  #badge a {
+    color: #a78bfa;
+    text-decoration: none;
+    pointer-events: auto;
+  }
+
+  /* ── Hint ────────────────────────────────────────── */
+  #hint {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 15, 15, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 11px;
+    color: #555;
+    z-index: 10;
+    transition: opacity 0.6s ease;
+  }
+
+  #hint.hidden { opacity: 0; pointer-events: none; }
+
+  /* ── Minimap ─────────────────────────────────────── */
+  #minimap {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    width: 160px;
+    height: 100px;
+    background: rgba(15, 15, 15, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    z-index: 10;
+    overflow: hidden;
+  }
+
+  #minimap canvas {
+    width: 100%;
+    height: 100%;
+  }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="title">Pretext Infinite Canvas</div>
+  <div class="stats">
+    <span>Zoom <span class="val" id="zoom-val">100%</span></span>
+    <span>Nodes <span class="val" id="node-count">0</span></span>
+    <span>Pan <span class="val" id="pan-val">0, 0</span></span>
+  </div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<div id="minimap"><canvas id="minimap-canvas"></canvas></div>
+
+<div id="hint">Scroll to zoom &middot; Drag to pan &middot; Click a note to select</div>
+
+<div id="badge">powered by <a href="https://github.com/chenglou/pretext" target="_blank">@chenglou/pretext</a></div>
+
+<script>
+// ── Constants ──────────────────────────────────────
+const GRID_SIZE  = 60;
+const MIN_ZOOM   = 0.1;
+const MAX_ZOOM   = 5;
+const NODE_RADIUS = 10;
+
+// ── Canvas Setup ───────────────────────────────────
+const mainCanvas = document.getElementById('canvas');
+const ctx = mainCanvas.getContext('2d');
+const mmCanvas = document.getElementById('minimap-canvas');
+const mmCtx = mmCanvas.getContext('2d');
+
+let W, H, dpr;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  mainCanvas.width  = W * dpr;
+  mainCanvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  mmCanvas.width  = 160 * dpr;
+  mmCanvas.height = 100 * dpr;
+  mmCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Camera ─────────────────────────────────────────
+let cam = { x: 0, y: 0, zoom: 1 };
+let targetCam = { x: 0, y: 0, zoom: 1 };
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function screenToWorld(sx, sy) {
+  return {
+    x: (sx - W / 2) / cam.zoom + cam.x,
+    y: (sy - H / 2) / cam.zoom + cam.y
+  };
+}
+
+// ── Nodes ──────────────────────────────────────────
+const PASTEL_COLORS = [
+  { bg: '#fef3c7', border: '#f59e0b', text: '#78350f' },  // amber
+  { bg: '#dbeafe', border: '#3b82f6', text: '#1e3a5f' },  // blue
+  { bg: '#dcfce7', border: '#22c55e', text: '#14532d' },  // green
+  { bg: '#fce7f3', border: '#ec4899', text: '#831843' },  // pink
+  { bg: '#e0e7ff', border: '#6366f1', text: '#312e81' },  // indigo
+  { bg: '#fef9c3', border: '#eab308', text: '#713f12' },  // yellow
+  { bg: '#f3e8ff', border: '#a855f7', text: '#581c87' },  // purple
+  { bg: '#ccfbf1', border: '#14b8a6', text: '#134e4a' },  // teal
+  { bg: '#ffe4e6', border: '#f43f5e', text: '#881337' },  // rose
+  { bg: '#fff7ed', border: '#f97316', text: '#7c2d12' },  // orange
+];
+
+const SAMPLE_NOTES = [
+  { title: 'Pixel-Perfect Text', body: 'Pretext measures every glyph at the sub-pixel level, so text stays crisp at any zoom. No DOM reflows, no layout thrashing.' },
+  { title: 'Infinite Canvas', body: 'Pan and zoom without limits. The canvas is your workspace - arrange thoughts freely in 2D space.' },
+  { title: 'Why Pretext?', body: 'Traditional text layout forces you into the DOM box model. Pretext gives you direct control over every character position.' },
+  { title: 'Performance', body: 'O(1) text measurement via cached font metrics. No layout passes needed. Renders 10,000+ text nodes at 60fps.' },
+  { title: 'Use Cases', body: 'Mind maps, design tools, collaborative whiteboards, node-based editors, visual programming environments.' },
+  { title: 'Font Metrics', body: 'Ascent, descent, line gap, advance width - all computed once and cached. Kerning pairs handled natively.' },
+  { title: 'Canvas API', body: 'Built on the HTML5 Canvas API. No WebGL required, works everywhere, falls back gracefully on older browsers.' },
+  { title: 'Touch Support', body: 'Pinch to zoom, drag to pan. Full mobile support with gesture recognition and momentum scrolling.' },
+  { title: 'Text Wrapping', body: 'Word-wrap with sub-pixel accuracy. Break points computed from actual glyph widths, not estimates.' },
+  { title: 'Open Source', body: 'MIT licensed. Fork it, extend it, ship it. Contributions welcome on GitHub.' },
+  { title: 'Architecture', body: 'Separate measurement and rendering passes. Measure once, render many. Layout is pure and side-effect free.' },
+  { title: 'Zoom Invariant', body: 'Text nodes stay readable at any zoom level. Font size adapts to maintain legibility while preserving spatial layout.' },
+];
+
+// Arrange nodes in a nice scattered grid
+const nodes = SAMPLE_NOTES.map((note, i) => {
+  const cols = 4;
+  const col = i % cols;
+  const row = Math.floor(i / cols);
+  const jitterX = (Math.sin(i * 7.3) * 80);
+  const jitterY = (Math.cos(i * 5.1) * 60);
+  const color = PASTEL_COLORS[i % PASTEL_COLORS.length];
+  return {
+    x: col * 340 - 500 + jitterX,
+    y: row * 260 - 300 + jitterY,
+    w: 260,
+    h: 0, // computed
+    title: note.title,
+    body: note.body,
+    color,
+    selected: false,
+    hovered: false,
+    scale: 1,
+    targetScale: 1,
+  };
+});
+
+document.getElementById('node-count').textContent = nodes.length;
+
+// ── Text Wrapping ──────────────────────────────────
+function wrapText(context, text, maxWidth, font) {
+  context.font = font;
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (context.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+// ── Compute Node Heights ───────────────────────────
+function computeNodeHeights() {
+  const pad = 16;
+  const titleFont = '600 14px Inter, sans-serif';
+  const bodyFont = '400 12.5px Inter, sans-serif';
+  for (const node of nodes) {
+    const titleLines = wrapText(ctx, node.title, node.w - pad * 2, titleFont);
+    const bodyLines = wrapText(ctx, node.body, node.w - pad * 2, bodyFont);
+    node.titleLines = titleLines;
+    node.bodyLines = bodyLines;
+    node.h = pad + titleLines.length * 20 + 8 + bodyLines.length * 18 + pad;
+  }
+}
+computeNodeHeights();
+
+// ── Drawing ────────────────────────────────────────
+function drawGrid() {
+  const gridSize = GRID_SIZE;
+  const offsetX = (-cam.x * cam.zoom + W / 2) % (gridSize * cam.zoom);
+  const offsetY = (-cam.y * cam.zoom + H / 2) % (gridSize * cam.zoom);
+  const step = gridSize * cam.zoom;
+
+  // Dots grid
+  const alpha = Math.min(1, Math.max(0.15, cam.zoom * 0.5));
+  ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.12})`;
+
+  for (let x = offsetX - step; x < W + step; x += step) {
+    for (let y = offsetY - step; y < H + step; y += step) {
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(1, 1.2 * cam.zoom), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Larger dots at major grid
+  if (cam.zoom > 0.3) {
+    const majorStep = step * 5;
+    const majorOffsetX = (-cam.x * cam.zoom + W / 2) % majorStep;
+    const majorOffsetY = (-cam.y * cam.zoom + H / 2) % majorStep;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.2})`;
+    for (let x = majorOffsetX - majorStep; x < W + majorStep; x += majorStep) {
+      for (let y = majorOffsetY - majorStep; y < H + majorStep; y += majorStep) {
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(1.5, 2 * cam.zoom), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+function worldToScreen(wx, wy) {
+  return {
+    x: (wx - cam.x) * cam.zoom + W / 2,
+    y: (wy - cam.y) * cam.zoom + H / 2
+  };
+}
+
+function drawNode(node) {
+  const s = worldToScreen(node.x, node.y);
+  const w = node.w * cam.zoom * node.scale;
+  const h = node.h * cam.zoom * node.scale;
+  const r = NODE_RADIUS * cam.zoom;
+  const pad = 16 * cam.zoom * node.scale;
+
+  // Skip if off screen
+  if (s.x + w < -50 || s.x > W + 50 || s.y + h < -50 || s.y > H + 50) return;
+
+  // Shadow
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.25)';
+  ctx.shadowBlur = 16 * cam.zoom;
+  ctx.shadowOffsetY = 4 * cam.zoom;
+
+  // Card background
+  ctx.fillStyle = node.color.bg;
+  ctx.beginPath();
+  ctx.roundRect(s.x, s.y, w, h, r);
+  ctx.fill();
+  ctx.restore();
+
+  // Selection / hover border
+  if (node.selected) {
+    ctx.strokeStyle = node.color.border;
+    ctx.lineWidth = 2.5 * cam.zoom;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.roundRect(s.x - 2 * cam.zoom, s.y - 2 * cam.zoom, w + 4 * cam.zoom, h + 4 * cam.zoom, r + 2);
+    ctx.stroke();
+  } else if (node.hovered) {
+    ctx.strokeStyle = node.color.border + '66';
+    ctx.lineWidth = 1.5 * cam.zoom;
+    ctx.beginPath();
+    ctx.roundRect(s.x, s.y, w, h, r);
+    ctx.stroke();
+  }
+
+  // Title
+  const fontSize = 14 * cam.zoom * node.scale;
+  if (fontSize < 3) return; // too small to read
+  ctx.fillStyle = node.color.text;
+  ctx.font = `600 ${fontSize}px Inter, sans-serif`;
+  let ty = s.y + pad + fontSize * 0.85;
+  for (const line of node.titleLines) {
+    ctx.fillText(line, s.x + pad, ty);
+    ty += 20 * cam.zoom * node.scale;
+  }
+
+  // Divider
+  ty += 2 * cam.zoom;
+  ctx.strokeStyle = node.color.border + '33';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(s.x + pad, ty);
+  ctx.lineTo(s.x + w - pad, ty);
+  ctx.stroke();
+  ty += 8 * cam.zoom * node.scale;
+
+  // Body
+  const bodySize = 12.5 * cam.zoom * node.scale;
+  if (bodySize < 2.5) return;
+  ctx.fillStyle = node.color.text + 'cc';
+  ctx.font = `400 ${bodySize}px Inter, sans-serif`;
+  for (const line of node.bodyLines) {
+    ctx.fillText(line, s.x + pad, ty + bodySize * 0.85);
+    ty += 18 * cam.zoom * node.scale;
+  }
+}
+
+function drawMinimap() {
+  const mw = 160, mh = 100;
+  mmCtx.clearRect(0, 0, mw, mh);
+  mmCtx.fillStyle = '#1a1a1a';
+  mmCtx.fillRect(0, 0, mw, mh);
+
+  // Find bounding box of all nodes
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x);
+    minY = Math.min(minY, n.y);
+    maxX = Math.max(maxX, n.x + n.w);
+    maxY = Math.max(maxY, n.y + n.h);
+  }
+
+  const padW = 100;
+  minX -= padW; minY -= padW; maxX += padW; maxY += padW;
+  const worldW = maxX - minX;
+  const worldH = maxY - minY;
+  const scaleX = mw / worldW;
+  const scaleY = mh / worldH;
+  const s = Math.min(scaleX, scaleY);
+
+  const ox = (mw - worldW * s) / 2;
+  const oy = (mh - worldH * s) / 2;
+
+  // Draw nodes as small colored rects
+  for (const n of nodes) {
+    const nx = ox + (n.x - minX) * s;
+    const ny = oy + (n.y - minY) * s;
+    const nw = n.w * s;
+    const nh = n.h * s;
+    mmCtx.fillStyle = n.color.border + '88';
+    mmCtx.fillRect(nx, ny, Math.max(nw, 2), Math.max(nh, 2));
+  }
+
+  // Draw viewport rect
+  const topLeft = screenToWorld(0, 48);
+  const botRight = screenToWorld(W, H);
+  const vx = ox + (topLeft.x - minX) * s;
+  const vy = oy + (topLeft.y - minY) * s;
+  const vw = (botRight.x - topLeft.x) * s;
+  const vh = (botRight.y - topLeft.y) * s;
+  mmCtx.strokeStyle = '#a78bfa';
+  mmCtx.lineWidth = 1.5;
+  mmCtx.strokeRect(vx, vy, vw, vh);
+}
+
+// ── Main Loop ──────────────────────────────────────
+let lastTime = 0;
+
+function frame(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  // Smooth camera
+  const t = 1 - Math.pow(0.001, dt);
+  cam.x = lerp(cam.x, targetCam.x, t);
+  cam.y = lerp(cam.y, targetCam.y, t);
+  cam.zoom = lerp(cam.zoom, targetCam.zoom, t);
+
+  // Animate node scales
+  for (const node of nodes) {
+    node.scale = lerp(node.scale, node.targetScale, t);
+  }
+
+  // Clear
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0f0f0f';
+  ctx.fillRect(0, 0, W, H);
+
+  drawGrid();
+
+  // Draw nodes back-to-front (selected last)
+  const sorted = [...nodes].sort((a, b) => (a.selected ? 1 : 0) - (b.selected ? 1 : 0));
+  for (const node of sorted) drawNode(node);
+
+  // Update toolbar
+  document.getElementById('zoom-val').textContent = Math.round(cam.zoom * 100) + '%';
+  document.getElementById('pan-val').textContent = Math.round(cam.x) + ', ' + Math.round(cam.y);
+
+  drawMinimap();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ── Interaction ────────────────────────────────────
+let isPanning = false;
+let panStart = { x: 0, y: 0 };
+let camStart = { x: 0, y: 0 };
+let interacted = false;
+
+function hitTest(sx, sy) {
+  const wp = screenToWorld(sx, sy);
+  // Reverse order so top nodes are hit first
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (wp.x >= n.x && wp.x <= n.x + n.w && wp.y >= n.y && wp.y <= n.y + n.h) {
+      return n;
+    }
+  }
+  return null;
+}
+
+// Mouse events
+mainCanvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  hideHint();
+
+  const hit = hitTest(e.clientX, e.clientY);
+  if (hit) {
+    // Select node
+    for (const n of nodes) n.selected = false;
+    hit.selected = true;
+    hit.targetScale = 1.04;
+    setTimeout(() => { hit.targetScale = 1; }, 200);
+  } else {
+    // Start panning
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY };
+    camStart = { x: targetCam.x, y: targetCam.y };
+    document.body.classList.add('grabbing');
+  }
+});
+
+mainCanvas.addEventListener('mousemove', (e) => {
+  if (isPanning) {
+    const dx = (e.clientX - panStart.x) / cam.zoom;
+    const dy = (e.clientY - panStart.y) / cam.zoom;
+    targetCam.x = camStart.x - dx;
+    targetCam.y = camStart.y - dy;
+  } else {
+    // Hover detection
+    const hit = hitTest(e.clientX, e.clientY);
+    for (const n of nodes) n.hovered = false;
+    if (hit) {
+      hit.hovered = true;
+      mainCanvas.style.cursor = 'pointer';
+    } else {
+      mainCanvas.style.cursor = 'grab';
+    }
+  }
+});
+
+window.addEventListener('mouseup', () => {
+  isPanning = false;
+  document.body.classList.remove('grabbing');
+});
+
+// Zoom with mouse wheel
+mainCanvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  hideHint();
+
+  const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+  const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * zoomFactor));
+
+  // Zoom toward cursor
+  const wp = screenToWorld(e.clientX, e.clientY);
+  targetCam.zoom = newZoom;
+  // Adjust pan so the point under cursor stays in place
+  targetCam.x = wp.x - (e.clientX - W / 2) / newZoom;
+  targetCam.y = wp.y - (e.clientY - H / 2) / newZoom;
+}, { passive: false });
+
+// ── Touch Support ──────────────────────────────────
+let touches = {};
+let lastPinchDist = 0;
+let lastPinchCenter = { x: 0, y: 0 };
+
+mainCanvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  hideHint();
+  for (const t of e.changedTouches) {
+    touches[t.identifier] = { x: t.clientX, y: t.clientY };
+  }
+  const ids = Object.keys(touches);
+  if (ids.length === 1) {
+    const hit = hitTest(e.touches[0].clientX, e.touches[0].clientY);
+    if (hit) {
+      for (const n of nodes) n.selected = false;
+      hit.selected = true;
+      hit.targetScale = 1.04;
+      setTimeout(() => { hit.targetScale = 1; }, 200);
+    }
+    isPanning = true;
+    panStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    camStart = { x: targetCam.x, y: targetCam.y };
+  } else if (ids.length >= 2) {
+    isPanning = false;
+    const t1 = touches[ids[0]], t2 = touches[ids[1]];
+    lastPinchDist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
+    lastPinchCenter = { x: (t1.x + t2.x) / 2, y: (t1.y + t2.y) / 2 };
+  }
+}, { passive: false });
+
+mainCanvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    touches[t.identifier] = { x: t.clientX, y: t.clientY };
+  }
+  const ids = Object.keys(touches);
+  if (ids.length === 1 && isPanning) {
+    const t = touches[ids[0]];
+    const dx = (t.x - panStart.x) / cam.zoom;
+    const dy = (t.y - panStart.y) / cam.zoom;
+    targetCam.x = camStart.x - dx;
+    targetCam.y = camStart.y - dy;
+  } else if (ids.length >= 2) {
+    const t1 = touches[ids[0]], t2 = touches[ids[1]];
+    const dist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
+    const center = { x: (t1.x + t2.x) / 2, y: (t1.y + t2.y) / 2 };
+
+    const zoomFactor = dist / lastPinchDist;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * zoomFactor));
+
+    const wp = screenToWorld(center.x, center.y);
+    targetCam.zoom = newZoom;
+    targetCam.x = wp.x - (center.x - W / 2) / newZoom;
+    targetCam.y = wp.y - (center.y - H / 2) / newZoom;
+
+    lastPinchDist = dist;
+    lastPinchCenter = center;
+  }
+}, { passive: false });
+
+mainCanvas.addEventListener('touchend', (e) => {
+  for (const t of e.changedTouches) {
+    delete touches[t.identifier];
+  }
+  if (Object.keys(touches).length === 0) isPanning = false;
+});
+
+// ── Keyboard shortcuts ─────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.key === '0') {
+    targetCam.x = 0; targetCam.y = 0; targetCam.zoom = 1;
+  }
+  if (e.key === '+' || e.key === '=') {
+    targetCam.zoom = Math.min(MAX_ZOOM, targetCam.zoom * 1.2);
+  }
+  if (e.key === '-') {
+    targetCam.zoom = Math.max(MIN_ZOOM, targetCam.zoom / 1.2);
+  }
+  if (e.key === 'Escape') {
+    for (const n of nodes) n.selected = false;
+  }
+});
+
+// ── Hint auto-hide ─────────────────────────────────
+function hideHint() {
+  if (!interacted) {
+    interacted = true;
+    document.getElementById('hint').classList.add('hidden');
+  }
+}
+
+// Auto-hide hint after 6s
+setTimeout(() => {
+  document.getElementById('hint').classList.add('hidden');
+}, 6000);
+
+// ── Entrance Animation ─────────────────────────────
+// Start zoomed out, animate in
+targetCam.zoom = 1;
+cam.zoom = 0.4;
+cam.x = targetCam.x;
+cam.y = targetCam.y;
+
+// Stagger node appearance
+for (let i = 0; i < nodes.length; i++) {
+  nodes[i].scale = 0;
+  nodes[i].targetScale = 0;
+  setTimeout(() => {
+    nodes[i].targetScale = 1;
+  }, 100 + i * 60);
+}
+</script>
+</body>
+</html>
