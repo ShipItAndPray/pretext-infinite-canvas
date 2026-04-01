@@ -2,6 +2,8 @@
 
 Figma/Miro-style infinite canvas where text nodes render with correct wrapping at any zoom level. Powered by [@chenglou/pretext](https://www.npmjs.com/package/@chenglou/pretext) for text measurement. Zero ghosting on first paint.
 
+**[Live Demo](https://shipitandpray.github.io/pretext-infinite-canvas/)**
+
 ## Why
 
 Canvas has no layout engine. To render multiline text you need to know line breaks, heights, and widths before drawing. Pretext's `prepare()` measures text once; `layout()` is pure arithmetic after that. This means:
